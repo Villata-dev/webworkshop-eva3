@@ -81,10 +81,9 @@ Este servidor fue desarrollado en Go. Necesitas tener Go instalado en tu sistema
     ```
     Esto creará un archivo llamado `main.server` (en Linux/macOS) o `main.server.exe` (en Windows) en la raíz del proyecto. Si hay errores de compilación, la terminal te lo indicará. Debes resolverlos antes de continuar.
 5.  **Ejecutar el Servidor:** Ejecuta el archivo compilado.
-    ```bash
-    ./main.server # En Linux/macOS
-    main.server.exe # En Windows
-    ```
+   
+   - go run web/main.server.go
+
     El servidor se iniciará y **deberías ver en la terminal mensajes de log similar a esto:**
     ```
     ⏳ Inicializando datos de ejemplo de productos...
