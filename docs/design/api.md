@@ -97,84 +97,69 @@ Este servidor fue desarrollado en Go. Necesitas tener Go instalado en tu sistema
     **Mantén esta terminal abierta y ejecutándose** mientras pruebas la API o usas el cliente web. El servidor escuchará peticiones HTTP en `http://localhost:8080`.
 
 
-## 🧪 Pruebas de Backend con cURL
+## 🧪 Pruebas Simplificadas con cURL
 
-Una vez que el servidor Go está ejecutándose (ver sección anterior), puedes usar la herramienta de línea de comandos `curl` para enviar peticiones HTTP directamente a la API y verificar su correcto funcionamiento antes de usar el cliente web. `curl` suele estar preinstalado en la mayoría de los sistemas operativos o es fácil de instalar.
+**Nota:** Mantén el servidor Go corriendo mientras ejecutas estos comandos en otra terminal.
 
-Abre una **segunda terminal** (manteniendo el servidor corriendo en la primera) para ejecutar los siguientes comandos.
+### 1. Ver todos los productos
+```bash
+curl http://localhost:8080/api/v1/productos
+```
 
-**Nota:** Usaremos el flag `-v` en `curl` para ver detalles completos de la petición y la respuesta (incluyendo cabeceras importantes como `Set-Cookie`, `Cookie`, `Access-Control-...` y los códigos de estado HTTP). Usaremos `-c <archivo.txt>` para indicar a `curl` que **guarde** las cookies recibidas en la respuesta en el archivo especificado (ej: `-c cookiejar.txt`). Usaremos `-b <archivo.txt>` para indicar a `curl` que **lea** las cookies del archivo especificado y las **envíe** en la cabecera `Cookie` de la petición, simulando el comportamiento del navegador.
+### 2. Registrar nuevo usuario
+```bash
+curl -X POST http://localhost:8080/api/auth/register \
+-H "Content-Type: application/json" \
+-d '{"username": "testuser", "password": "123456"}'
+```
 
-1.  **Verificar Servidor y CORS (GET /api/v1/productos):** Prueba una petición básica para confirmar que el servidor responde y setea las cabeceras CORS correctamente para el origen de tu frontend (asumiendo que configuras CORS para responder a `http://localhost:5500`).
-    ```bash
-    curl -v -H "Origin: http://localhost:5500" http://localhost:8080/api/v1/productos
-    ```
-    * **Verificar:** La respuesta incluye `HTTP/1.1 200 OK`, la cabecera `Access-Control-Allow-Origin: http://localhost:5500` y un cuerpo JSON con la lista de productos de ejemplo.
+### 3. Iniciar sesión como usuario normal
+```bash
+curl -X POST http://localhost:8080/api/auth/login \
+-H "Content-Type: application/json" \
+-d '{"username": "user", "password": "user123"}' \
+-c user.txt
+```
 
-2.  **Registrar un Usuario:**
-    ```bash
-    curl -v -H "Content-Type: application/json" -H "Origin: http://localhost:5500" -d '{"username": "testuser", "password": "securepassword123"}' http://localhost:8080/api/auth/register
-    ```
-    * **Verificar:** La respuesta incluye `HTTP/1.1 201 Created`, `Access-Control-Allow-Origin: http://localhost:5500` y un cuerpo JSON de éxito (`"message": "Usuario registrado exitosamente", ...`).
-    * *Prueba Adicional:* Intenta registrar el mismo usuario de nuevo. Deberías obtener `HTTP/1.1 409 Conflict` y un mensaje de error.
+### 4. Iniciar sesión como administrador
+```bash
+curl -X POST http://localhost:8080/api/auth/login \
+-H "Content-Type: application/json" \
+-d '{"username": "admin", "password": "admin123"}' \
+-c admin.txt
+```
 
-3.  **Iniciar Sesión (Guardar Cookie para 'user'):** Usaremos el usuario de ejemplo 'user' (`user123`). Guarda la cookie en `user_cookiejar.txt`.
-    ```bash
-    curl -v -c user_cookiejar.txt -H "Content-Type: application/json" -H "Origin: http://localhost:5500" -d '{"username": "user", "password": "user123"}' http://localhost:8080/api/auth/login
-    ```
-    * **Verificar:** La respuesta incluye `HTTP/1.1 200 OK`, un cuerpo JSON de éxito (sin `session_id`), `Access-Control-Allow-Origin`, `Access-Control-Allow-Credentials: true` y **la cabecera `Set-Cookie: session_id=...`**. Verifica que se creó o actualizó el archivo `user_cookiejar.txt`.
+### 5. Crear un producto (requiere estar logueado)
+```bash
+curl -X POST http://localhost:8080/api/v1/productos \
+-H "Content-Type: application/json" \
+-b user.txt \
+-d '{"nombre": "Nuevo Producto", "precio": 10.0, "stock": 5}'
+```
 
-4.  **Iniciar Sesión como Admin (Guardar Cookie para 'admin'):** Usa el usuario de ejemplo 'admin' (`admin123`). Guarda la cookie en `admin_cookiejar.txt`.
-    ```bash
-    curl -v -c admin_cookiejar.txt -H "Content-Type: application/json" -H "Origin: http://localhost:5500" -d '{"username": "admin", "password": "admin123"}' http://localhost:8080/api/auth/login
-    ```
-    * **Verificar:** `HTTP/1.1 200 OK`, JSON de éxito, `Set-Cookie`, `Access-Control-Allow-Origin`, `Access-Control-Allow-Credentials: true`. Archivo `admin_cookiejar.txt` creado/actualizado.
+### 6. Actualizar un producto (requiere estar logueado)
+```bash
+curl -X PUT http://localhost:8080/api/v1/productos/1 \
+-H "Content-Type: application/json" \
+-b user.txt \
+-d '{"nombre": "Producto Actualizado", "precio": 20.0}'
+```
 
-5.  **Acceso a Ruta Protegida (POST Crear Producto) Sin Autenticar:** Intenta crear un producto sin enviar ninguna cookie (simulando un usuario no logueado).
-    ```bash
-    curl -v -H "Content-Type: application/json" -H "Origin: http://localhost:5500" -d '{"nombre": "Producto Bloqueado", "precio": 1.0}' http://localhost:8080/api/v1/productos
-    ```
-    * **Verificar:** La respuesta incluye `HTTP/1.1 401 Unauthorized` y un mensaje de error ("Autenticación requerida..."). Los logs del servidor deberían mostrar que `requireAuth` bloqueó la petición.
+### 7. Eliminar un producto (solo admin)
+```bash
+curl -X DELETE http://localhost:8080/api/v1/productos/1 \
+-b admin.txt
+```
 
-6.  **Acceso a Ruta Protegida (POST Crear Producto) Autenticado (Usuario 'user'):** Usa el archivo de cookie del usuario normal (`-b user_cookiejar.txt`).
-    ```bash
-    curl -v -b user_cookiejar.txt -H "Content-Type: application/json" -H "Origin: http://localhost:5500" -d '{"nombre": "Producto Creado por User", "descripcion": "Demo", "precio": 10.0, "stock": 5}' http://localhost:8080/api/v1/productos
-    ```
-    * **Verificar:** La respuesta incluye `HTTP/1.1 201 Created` y el JSON del producto creado. Los logs deberían mostrar que `requireAuth` pasó y `crearProductoHandler` se ejecutó.
+### 8. Cerrar sesión
+```bash
+curl -X POST http://localhost:8080/api/auth/logout \
+-b user.txt
+```
 
-7.  **Acceso a Ruta Protegida (PUT Actualizar Producto) Autenticado (Usuario 'user'):** Actualiza uno de los productos de ejemplo o uno creado (ej: ID `1`). Usa el archivo de cookie del usuario normal.
-    ```bash
-    curl -v -b user_cookiejar.txt -H "Content-Type: application/json" -H "Origin: http://localhost:5500" -d '{"nombre": "Laptop Gamer UPD user", "precio": 1250.00}' http://localhost:8080/api/v1/productos/1
-    ```
-    * **Verificar:** La respuesta incluye `HTTP/1.1 200 OK` y el JSON del producto actualizado. Logs mostrando que `requireAuth` pasó.
-
-8.  **Acceso a Ruta Protegida (DELETE Eliminar Producto) Autenticado (Usuario 'user'):** Intenta eliminar un producto (ej: ID `1`). Usa el archivo de cookie del usuario normal.
-    ```bash
-    curl -v -b user_cookiejar.txt -H "Origin: http://localhost:5500" -X DELETE http://localhost:8080/api/v1/productos/1
-    ```
-    * **Verificar:** La respuesta incluye `HTTP/1.1 403 Forbidden` y un mensaje de error ("Permiso denegado."). Logs mostrando que `requireAuth` pasó, pero `requireRole` bloqueó la petición.
-
-9.  **Acceso a Ruta Protegida (DELETE Eliminar Producto) Autenticado (Usuario 'admin'):** Usa el archivo de cookie del usuario admin (`-b admin_cookiejar.txt`). Elimina un producto (ej: ID 2).
-    ```bash
-    curl -v -b admin_cookiejar.txt -H "Origin: http://localhost:5500" -X DELETE http://localhost:8080/api/v1/productos/2
-    ```
-    * **Verificar:** La respuesta incluye `HTTP/1.1 204 No Content`. Logs mostrando que `requireAuth` y `requireRole` pasaron.
-
-10. **Cerrar Sesión (para usuario 'user'):** Usa el archivo de cookie del usuario normal.
-    ```bash
-    curl -v -b user_cookiejar.txt -H "Origin: http://localhost:5500" -X POST http://localhost:8080/api/auth/logout
-    ```
-    * **Verificar:** La respuesta incluye `HTTP/1.1 204 No Content`. En las cabeceras (`-v`), busca `Set-Cookie: session_id=; Expires=(una fecha pasada)`. Los logs deberían mostrar que la sesión fue eliminada del almacenamiento en memoria.
-
-11. **Cerrar Sesión (Sin Cookie):** Elimina el archivo `user_cookiejar.txt` o usa un nombre diferente en `-b`.
-    ```bash
-    curl -v -b non_existent_cookiejar.txt -H "Origin: http://localhost:5500" -X POST http://localhost:8080/api/auth/logout
-    ```
-    * **Verificar:** La respuesta incluye `HTTP/1.1 204 No Content`. Los logs deberían mostrar "Intento de logout sin cookie de sesión activa.".
-
-12. **Acceso a Ruta Protegida Después de Cerrar Sesión:** Intenta una petición protegida (ej: POST crear) usando el archivo `user_cookiejar.txt` después de haber hecho logout.
-    ```bash
-    curl -v -b user_cookiejar.txt -H "Content-Type: application/json" -H "Origin: http://localhost:5500" -d '{"nombre": "Post Logout", "precio": 1.0}' http://localhost:8080/api/v1/productos
-    ```
-    * **Verificar:** La respuesta incluye `HTTP/1.1 401 Unauthorized`.
-
+**Notas importantes:**
+- El archivo `user.txt` guarda la cookie de sesión del usuario normal
+- El archivo `admin.txt` guarda la cookie de sesión del administrador
+- Necesitas estar logueado para crear y actualizar productos
+- Solo el administrador puede eliminar productos
+- Los IDs (como el "1" en los ejemplos) pueden variar según los productos existentes
