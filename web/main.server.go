@@ -2,18 +2,18 @@ package main
 
 import (
 	"context"
-	"encoding/json"
-	"fmt" // Importar fmt si se usa para Printf, etc.
+	"encoding/json" // Importar fmt si se usa para Printf, etc.
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 
 	// Remover "sync" si mueves sesiones fuera de main
 	"time"
 
-	"web-workshop-eval3/modules/producto"
-	"web-workshop-eval3/modules/usuario" // Asegúrate que la ruta es correcta y que incluye la lógica de sesiones
+	"web-workshop-eval3/web/modules/producto"
+	"web-workshop-eval3/web/modules/usuario" // Asegúrate que la ruta es correcta y que incluye la lógica de sesiones
 
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
@@ -22,7 +22,7 @@ import (
 // Constantes para el manejo de sesiones (mantener aquí)
 const (
 	cookieNombreSesion = "session_id"
-	duracionSesion     = 24 * time.Hour // Duración de la sesión (ej: 24 horas)
+	duracionSesion     = 24 * time.Hour
 )
 
 // Definir tipo y constante para la clave de contexto del usuario autenticado
@@ -43,172 +43,41 @@ func eliminarSesion(sessionID string) { ... } // Necesitas esta función para lo
 */
 
 func main() {
-	// Creamos un multiplexer (router) básico de net/http
+	// Inicializar el mux
 	mux := http.NewServeMux()
 
-	// --- Rutas Estáticas para el Cliente Web ---
-	fs := http.FileServer(http.Dir("./web/public"))
-	mux.Handle("/", fs)
+	// Configurar el servidor de archivos estáticos
+	fs := http.FileServer(http.Dir("web/public"))
+	mux.Handle("/", http.StripPrefix("/", fs))
 
-	// --- Datos de Ejemplo (Simulación de DB en memoria) ---
-	log.Println("⏳ Inicializando datos de ejemplo de productos...")
-	// ... (tu código para inicializar productos) ...
-	id1 := producto.GenerarSiguienteID()
-	producto.Productos[id1] = &producto.Producto{ /* ... */ }
-	id2 := producto.GenerarSiguienteID()
-	producto.Productos[id2] = &producto.Producto{ /* ... */ }
-	id3 := producto.GenerarSiguienteID()
-	producto.Productos[id3] = &producto.Producto{ /* ... */ }
-	log.Printf("✅ Inicializados %d productos de ejemplo.", len(producto.Productos))
+	// Rutas públicas
+	mux.HandleFunc("/api/auth/login", loginHandler)
+	mux.HandleFunc("/api/auth/logout", logoutHandler)
+	mux.HandleFunc("/api/auth/register", registrarUsuarioHandler)
 
-	// --- Usuarios de Ejemplo (Para poder probar login) ---
-	// Asegúrate de que modules/usuario/usuario.go tiene las funciones con Mutex
-	log.Println("⏳ Registrando usuarios de ejemplo 'admin' y 'user'...")
-	hashedPasswordAdmin, errAdmin := bcrypt.GenerateFromPassword([]byte("admin123"), bcrypt.DefaultCost)
-	if errAdmin != nil {
-		log.Fatalf("Fatal: No se pudo hashear contraseña de admin de ejemplo: %v", errAdmin)
-	}
-	usuarioAdmin := &usuario.Usuario{
-		ID:             uuid.New().String(), // UUID para el admin
-		NombreUsuario:  "admin",
-		HashContraseña: hashedPasswordAdmin,
-		Rol:            "admin", // Rol de administrador
-	}
-	// Usamos la función segura del paquete usuario para agregar al usuario
-	if err := usuario.AgregarUsuario(usuarioAdmin); err != nil {
-		log.Printf("⚠️ No se pudo registrar usuario admin de ejemplo: %v (quizás ya existe)", err)
-	} else {
-		log.Println("✅ Usuario de ejemplo 'admin' registrado.")
-	}
-
-	hashedPasswordUser, errUser := bcrypt.GenerateFromPassword([]byte("user123"), bcrypt.DefaultCost)
-	if errUser != nil {
-		log.Fatalf("Fatal: No se pudo hashear contraseña de user de ejemplo: %v", errUser)
-	}
-	usuarioNormal := &usuario.Usuario{
-		ID:             uuid.New().String(), // UUID para el usuario normal
-		NombreUsuario:  "user",
-		HashContraseña: hashedPasswordUser,
-		Rol:            "usuario", // Rol normal
-	}
-	// Usamos la función segura del paquete usuario para agregar al usuario
-	if err := usuario.AgregarUsuario(usuarioNormal); err != nil {
-		log.Printf("⚠️ No se pudo registrar usuario user de ejemplo: %v (quizás ya existe)", err)
-	} else {
-		log.Println("✅ Usuario de ejemplo 'user' registrado.")
-	}
-	log.Printf("✅ Usuarios de ejemplo registrados.")
-
-	// --- Rutas de la API ---
-
-	// Endpoint para listar todos los productos (GET /api/v1/productos) - NO requiere auth
-	// Llama a configurarCORS al inicio del handler
-	mux.HandleFunc("GET /api/v1/productos", func(w http.ResponseWriter, r *http.Request) {
-		configurarCORS(w) // Configura CORS para esta ruta
-		if r.Method != http.MethodGet {
-			http.Error(w, "Método no permitido", http.StatusMethodNotAllowed) // 405
-			return
+	// Rutas protegidas
+	mux.HandleFunc("/api/v1/productos", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			requireAuth(crearProductoHandler)(w, r)
+		} else {
+			requireAuth(listarProductosHandler)(w, r)
 		}
-		listarProductosHandler(w, r)
 	})
 
-	// Endpoint para crear un nuevo producto (POST /api/v1/productos) - REQUIERE auth (cualquier usuario logueado)
-	// Aplica el middleware requireAuth
-	mux.HandleFunc("POST /api/v1/productos", requireAuth(func(w http.ResponseWriter, r *http.Request) {
-		configurarCORS(w) // Configura CORS antes de la lógica del handler
-		if r.Method != http.MethodPost {
-			http.Error(w, "Método no permitido", http.StatusMethodNotAllowed) // 405
-			return
+	// Rutas protegidas que requieren rol admin
+	mux.HandleFunc("/api/v1/productos/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			requireAuth(requireRole("admin")(eliminarProductoHandler))(w, r)
+		} else {
+			requireAuth(manejarProducto)(w, r)
 		}
-		crearProductoHandler(w, r) // Llama al handler real
-	}))
-
-	// Endpoint para obtener un producto por ID (GET /api/v1/productos/{id}) - NO requiere auth
-	// Usa patrón {id} y llama a configurarCORS
-	mux.HandleFunc("GET /api/v1/productos/{id}", func(w http.ResponseWriter, r *http.Request) {
-		configurarCORS(w)               // Configura CORS
-		if r.Method != http.MethodGet { // Redundante si se registra "GET /...", pero robusto
-			http.Error(w, "Método no permitido", http.StatusMethodNotAllowed) // 405
-			return
-		}
-		obtenerProductoHandler(w, r) // r.PathValue("id") funcionará aquí
 	})
 
-	// Endpoint para actualizar un producto existente (PUT /api/v1/productos/{id}) - REQUIERE auth (cualquier usuario logueado)
-	// Usa patrón {id}, aplica middleware requireAuth y llama a configurarCORS
-	mux.HandleFunc("PUT /api/v1/productos/{id}", requireAuth(func(w http.ResponseWriter, r *http.Request) {
-		configurarCORS(w)               // Configura CORS
-		if r.Method != http.MethodPut { // Redundante
-			http.Error(w, "Método no permitido", http.StatusMethodNotAllowed) // 405
-			return
-		}
-		actualizarProductoHandler(w, r) // r.PathValue("id") funcionará aquí
-	}))
-
-	// Endpoint para eliminar un producto (DELETE /api/v1/productos/{id}) - REQUIERE auth Y PERMISO admin
-	// Usa patrón {id}, aplica requireAuth Y requireRole("admin") y llama a configurarCORS
-	mux.HandleFunc("DELETE /api/v1/productos/{id}", requireAuth(requireRole("admin")(func(w http.ResponseWriter, r *http.Request) {
-		configurarCORS(w)                  // Configura CORS
-		if r.Method != http.MethodDelete { // Redundante
-			http.Error(w, "Método no permitido", http.StatusMethodNotAllowed) // 405
-			return
-		}
-		eliminarProductoHandler(w, r) // r.PathValue("id") funcionará aquí
-	})))
-
-	// --- Rutas de Autenticación ---
-	// IMPORTANTE: Usar el prefijo /api/auth/ según la evaluación
-	// Llama a configurarCORS en cada handler de autenticación
-	mux.HandleFunc("POST /api/auth/register", func(w http.ResponseWriter, r *http.Request) {
-		configurarCORS(w) // Configura CORS
-		if r.Method != http.MethodPost {
-			http.Error(w, "Método no permitido", http.StatusMethodNotAllowed) // 405
-			return
-		}
-		registrarUsuarioHandler(w, r)
-	})
-
-	mux.HandleFunc("POST /api/auth/login", func(w http.ResponseWriter, r *http.Request) {
-		configurarCORS(w) // Configura CORS
-		if r.Method != http.MethodPost {
-			http.Error(w, "Método no permitido", http.StatusMethodNotAllowed) // 405
-			return
-		}
-		iniciarSesionHandler(w, r)
-	})
-
-	mux.HandleFunc("POST /api/auth/logout", func(w http.ResponseWriter, r *http.Request) {
-		configurarCORS(w) // Configura CORS
-		if r.Method != http.MethodPost {
-			http.Error(w, "Método no permitido", http.StatusMethodNotAllowed) // 405
-			return
-		}
-		cerrarSesionHandler(w, r)
-	})
-
-	// NOTA sobre OPTIONS (Preflight CORS): HandleFunc("METHOD /path", handler) de net/http
-	// no maneja automáticamente los métodos OPTIONS para preflight.
-	// Si el frontend hace peticiones PUT/DELETE/POST con cabeceras o cuerpos complejos
-	// a un origen distinto, el navegador enviará un OPTIONS antes.
-	// La forma correcta de manejar OPTIONS es tener un middleware de CORS que responda
-	// a OPTIONS antes que tus handlers. Como no lo tenemos completo, las cabeceras
-	// "Access-Control-Allow-Methods" y "Access-Control-Allow-Headers" en configurarCORS
-	// son la forma más simple para que el navegador sepa qué está permitido DESPUÉS
-	// de un preflight OPTIONS (asumiendo que el navegador cachea la respuesta OPTIONS
-	// o que no se envía un OPTIONS si la petición es simple). Para esta evaluación,
-	// puede ser suficiente. Un middleware CORS completo es más robusto.
-
-	// --- Configuración del Servidor ---
-	server := &http.Server{
-		Addr:         ":8080", // El puerto en el que escuchará el servidor
-		Handler:      mux,     // Usamos nuestro multiplexer
-		ReadTimeout:  10 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  120 * time.Second,
+	// Inicializar el servidor
+	log.Println("🚀 Servidor iniciando en http://localhost:8080")
+	if err := http.ListenAndServe(":8080", mux); err != nil {
+		log.Fatalf("Error al iniciar el servidor: %v", err)
 	}
-
-	log.Printf("🚀 Servidor iniciado en http://localhost%s", server.Addr)
-	log.Fatal(server.ListenAndServe())
 }
 
 // --- Handlers de la API para Productos ---
@@ -218,24 +87,76 @@ func main() {
 // Remover la obtención del ID del contexto en estos handlers si se usa r.PathValue.
 
 func listarProductosHandler(w http.ResponseWriter, r *http.Request) {
-	// Referenciar 'r' para evitar error de parámetro no usado
-	_ = r.Method
-	log.Println("📝 Ejecutando listarProductosHandler")
-	// ... (tu lógica existente) ...
-	// Remover Method check si se registra como "GET /..."
+	configurarCORS(w)
 
-	productosSlice := []producto.Producto{}
-	for _, p := range producto.Productos {
-		productosSlice = append(productosSlice, *p)
+	if r.Method != http.MethodGet {
+		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+		return
 	}
 
-	// Remover cabeceras CORS si se llaman en configurarCORS al inicio del handler wrap
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	// Estructura para la respuesta paginada
+	type PaginatedResponse struct {
+		Items      []producto.Producto `json:"items"`
+		TotalItems int                 `json:"totalItems"`
+		Page       int                 `json:"page"`
+		PerPage    int                 `json:"perPage"`
+	}
 
-	if err := json.NewEncoder(w).Encode(productosSlice); err != nil {
-		log.Printf("❌ Error al codificar respuesta JSON: %v", err)
-		// No llamar http.Error si cabecera ya escrita
+	// Obtener parámetros de paginación
+	page := 1
+	perPage := 5
+
+	if pageStr := r.URL.Query().Get("page"); pageStr != "" {
+		if p, err := strconv.Atoi(pageStr); err == nil && p > 0 {
+			page = p
+		}
+	}
+
+	if perPageStr := r.URL.Query().Get("perPage"); perPageStr != "" {
+		if pp, err := strconv.Atoi(perPageStr); err == nil && pp > 0 {
+			perPage = pp
+		}
+	}
+
+	// Calcular índices
+	start := (page - 1) * perPage
+	end := start + perPage
+
+	// Obtener todos los productos y paginar
+	var items []producto.Producto
+	totalItems := len(producto.Productos)
+
+	// Ajustar el final si excede el total
+	if end > totalItems {
+		end = totalItems
+	}
+
+	// Extraer slice de productos para la página actual
+	keys := make([]string, 0, len(producto.Productos))
+	for k := range producto.Productos {
+		keys = append(keys, k)
+	}
+	// Ordenar los keys para que la paginación sea consistente (opcional)
+	// sort.Strings(keys)
+
+	for i := start; i < end && i < len(keys); i++ {
+		items = append(items, *producto.Productos[keys[i]])
+	}
+
+	// Preparar respuesta paginada
+	response := PaginatedResponse{
+		Items:      items,
+		TotalItems: totalItems,
+		Page:       page,
+		PerPage:    perPage,
+	}
+
+	// Asegurarse de encodificar la respuesta correctamente
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		log.Printf("Error al encodificar respuesta JSON: %v", err)
+		http.Error(w, "Error interno del servidor", http.StatusInternalServerError)
+		return
 	}
 	log.Println("✅ listarProductosHandler completado")
 }
@@ -246,9 +167,12 @@ func obtenerProductoHandler(w http.ResponseWriter, r *http.Request) {
 	// Remover Method check
 	// --- Obtener ID del patrón de la ruta (CORRECCIÓN) ---
 	// Ya NO se obtiene del contexto si usas registro con {id}
-	id := r.PathValue("id") // Obtener ID usando r.PathValue
+	// Extraer el ID del producto desde la URL manualmente (Go <1.22)
+	// Espera rutas tipo /api/v1/productos/{id}
+	pathParts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/productos/"), "/")
+	id := pathParts[0]
 
-	if id == "" { // Esta verificación sigue siendo útil aunque r.PathValue con {id} patrón no debería dar vacío
+	if id == "" || id == r.URL.Path || strings.Contains(id, "/") {
 		log.Println("❌ ID de producto no proporcionado en la ruta (PathValue vacío)")
 		http.Error(w, "ID no proporcionado en la ruta", http.StatusBadRequest) // 400
 		return
@@ -327,12 +251,11 @@ func actualizarProductoHandler(w http.ResponseWriter, r *http.Request) {
 	// configurarCORS(w) // Ya llamada en el middleware wrap
 	log.Println("📝 Ejecutando actualizarProductoHandler")
 	// Remover Method check
+	// Extraer el ID del producto desde la URL manualmente (Go <1.22)
+	pathParts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/productos/"), "/")
+	idProductoAActualizar := pathParts[0]
 
-	// --- Obtener ID del patrón de la ruta (CORRECCIÓN) ---
-	// Ya NO se obtiene del contexto si usas registro con {id}
-	idProductoAActualizar := r.PathValue("id") // Obtener ID usando r.PathValue
-
-	if idProductoAActualizar == "" { // Verificación necesaria
+	if idProductoAActualizar == "" || idProductoAActualizar == r.URL.Path || strings.Contains(idProductoAActualizar, "/") {
 		log.Println("❌ ID de producto a actualizar no proporcionado en la ruta (PathValue vacío)")
 		http.Error(w, "ID no proporcionado en la ruta", http.StatusBadRequest) // 400
 		return
@@ -397,14 +320,11 @@ func actualizarProductoHandler(w http.ResponseWriter, r *http.Request) {
 
 func eliminarProductoHandler(w http.ResponseWriter, r *http.Request) {
 	// configurarCORS(w) // Ya llamada en el middleware wrap
-	log.Println("📝 Ejecutando eliminarProductoHandler")
-	// Remover Method check
+	// Extraer el ID del producto desde la URL manualmente (Go <1.22)
+	pathParts := strings.Split(strings.TrimPrefix(r.URL.Path, "/api/v1/productos/"), "/")
+	idProductoAEliminar := pathParts[0]
 
-	// --- Obtener ID del patrón de la ruta (CORRECCIÓN) ---
-	// Ya NO se obtiene del contexto si usas registro con {id}
-	idProductoAEliminar := r.PathValue("id") // Obtener ID usando r.PathValue
-
-	if idProductoAEliminar == "" { // Verificación necesaria
+	if idProductoAEliminar == "" || idProductoAEliminar == r.URL.Path || strings.Contains(idProductoAEliminar, "/") {
 		log.Println("❌ ID de producto a eliminar no proporcionado en la ruta (PathValue vacío)")
 		http.Error(w, "ID no proporcionado en la ruta", http.StatusBadRequest) // 400
 		return
@@ -510,84 +430,63 @@ func registrarUsuarioHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func iniciarSesionHandler(w http.ResponseWriter, r *http.Request) {
-	// configurarCORS(w) // Ya llamada en el main func wrap
-	log.Println("📝 Ejecutando iniciarSesionHandler")
-	// Remover Method check
+	configurarCORS(w)
+	log.Println("📝 Iniciando proceso de login")
 
-	var credenciales usuario.Credenciales
-	lectorLimitado := io.LimitReader(r.Body, 1048576)
-	if err := json.NewDecoder(lectorLimitado).Decode(&credenciales); err != nil {
-		log.Printf("❌ Error al decodificar JSON de inicio de sesión: %v", err)
-		http.Error(w, "Error al decodificar credenciales. Asegúrate de enviar JSON válido con 'username' y 'password'.", http.StatusBadRequest)
+	var credenciales struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&credenciales); err != nil {
+		log.Printf("❌ Error decodificando credenciales: %v", err)
+		http.Error(w, "Error al decodificar credenciales", http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close()
 
-	if strings.TrimSpace(credenciales.NombreUsuario) == "" || strings.TrimSpace(credenciales.Contraseña) == "" {
-		log.Println("❌ Intento de inicio de sesión con usuario o contraseña vacíos.")
-		http.Error(w, "Nombre de usuario y contraseña no pueden estar vacíos.", http.StatusBadRequest)
-		return
-	}
+	log.Printf("👤 Intentando autenticar usuario: %s", credenciales.Username)
 
 	// Usar la función del paquete usuario
-	usuarioEncontrado, existe := usuario.ObtenerUsuarioPorNombre(credenciales.NombreUsuario)
+	usuarioEncontrado, existe := usuario.ObtenerUsuarioPorNombre(credenciales.Username)
 	if !existe {
-		log.Printf("❌ Intento de login fallido: usuario '%s' no encontrado.", credenciales.NombreUsuario)
-		http.Error(w, "Credenciales inválidas.", http.StatusUnauthorized) // 401
+		log.Printf("❌ Usuario no encontrado: %s", credenciales.Username)
+		http.Error(w, "Credenciales inválidas", http.StatusUnauthorized)
 		return
 	}
 
-	err := bcrypt.CompareHashAndPassword(usuarioEncontrado.HashContraseña, []byte(credenciales.Contraseña))
-	if err != nil {
-		log.Printf("❌ Intento de login fallido para usuario '%s': contraseña incorrecta.", credenciales.NombreUsuario)
-		http.Error(w, "Credenciales inválidas.", http.StatusUnauthorized) // 401
+	// Verificar contraseña
+	if err := bcrypt.CompareHashAndPassword(usuarioEncontrado.HashContraseña,
+		[]byte(credenciales.Password)); err != nil {
+		log.Printf("❌ Contraseña incorrecta para usuario: %s", credenciales.Username)
+		http.Error(w, "Credenciales inválidas", http.StatusUnauthorized)
 		return
 	}
 
-	log.Printf("✅ Autenticación exitosa para usuario: '%s'", usuarioEncontrado.NombreUsuario)
+	log.Printf("✅ Usuario autenticado exitosamente: %s", credenciales.Username)
 
-	// --- Autenticación Exitosa: Crear Sesión y Setear Cookie ---
+	// Crear sesión
+	sessionID := uuid.New().String()
+	usuario.CrearSesion(sessionID)
 
-	// Usar la función del paquete usuario
-	sessionID, err := usuario.CrearSesion(usuarioEncontrado.ID) // Asociar el usuario ID con un nuevo ID de sesión
-	if err != nil {
-		log.Printf("❌ Error al crear sesión para usuario '%s': %v", usuarioEncontrado.NombreUsuario, err)
-		http.Error(w, "Error interno del servidor al crear sesión.", http.StatusInternalServerError) // 500
-		return
-	}
-
-	expires := time.Now().Add(duracionSesion)
-	cookie := http.Cookie{
-		Name:     cookieNombreSesion,
+	// Establecer cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     cookieNombreSesion, // Usar la constante en lugar del string literal
 		Value:    sessionID,
-		Expires:  expires,
 		Path:     "/",
 		HttpOnly: true,
-		Secure:   false,                // DEBE ser 'true' en producción con HTTPS
-		SameSite: http.SameSiteLaxMode, // O StrictMode
-	}
-	http.SetCookie(w, &cookie) // Setear la cookie en la respuesta
+		SameSite: http.SameSiteLaxMode,
+	})
 
-	log.Printf("✅ Cookie de sesión seteada para usuario '%s'", usuarioEncontrado.NombreUsuario)
-
-	// --- Respuesta Exitosa ---
-	respuestaExito := map[string]interface{}{ // Usar interface{} si mezclas tipos
-		"message":  fmt.Sprintf("Inicio de sesión exitoso para %s", usuarioEncontrado.NombreUsuario),
-		"username": usuarioEncontrado.NombreUsuario,
-		"id":       usuarioEncontrado.ID,  // Puedes incluir el ID
-		"rol":      usuarioEncontrado.Rol, // Puedes incluir el rol
-		// ¡¡IMPORTANTE!! NO INCLUIR "session_id"
-	}
-
-	// Remover cabeceras CORS
-
+	// Enviar respuesta
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK) // 200 OK
-
-	if err := json.NewEncoder(w).Encode(respuestaExito); err != nil {
-		log.Printf("❌ Error al codificar respuesta JSON de login: %v", err)
+	response := map[string]interface{}{
+		"id":       usuarioEncontrado.ID,
+		"username": usuarioEncontrado.NombreUsuario,
+		"rol":      usuarioEncontrado.Rol,
 	}
-	log.Println("✅ iniciarSesionHandler completado")
+
+	log.Printf("📤 Enviando respuesta: %+v", response)
+	json.NewEncoder(w).Encode(response)
 }
 
 func cerrarSesionHandler(w http.ResponseWriter, r *http.Request) {
@@ -642,153 +541,116 @@ func cerrarSesionHandler(w http.ResponseWriter, r *http.Request) {
 
 // --- Middleware de Autenticación ---
 
-// requireAuth es un middleware que verifica si el usuario está autenticado (tiene una sesión válida).
-// Si es válido, añade el usuario al contexto y llama al siguiente handler. Responde 401 si no es válido.
-// Este middleware DEBE llamarse ANTES de cualquier middleware de permisos (como requireRole).
+// requireAuth es un middleware que verifica si el usuario está autenticado mediante la cookie de sesión.
 func requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("🔒 Middleware requireAuth para %s %s", r.Method, r.URL.Path)
+		// Configurar headers CORS para permitir peticiones del frontend
+		configurarCORS(w)
 
-		// CORS headers para respuestas 401 (aunque mejor un middleware CORS general)
-		configurarCORS(w) // Configura CORS incluso para 401
+		// Si es una petición OPTIONS, retornar inmediatamente
+		if r.Method == http.MethodOptions {
+			return
+		}
 
-		// 1. Intentar obtener la cookie de sesión
+		// Buscar la cookie de sesión
 		cookie, err := r.Cookie(cookieNombreSesion)
 		if err != nil {
-			if err == http.ErrNoCookie {
-				log.Println("❌ requireAuth: Cookie de sesión no encontrada.")
-				http.Error(w, "Autenticación requerida. No se encontró cookie de sesión.", http.StatusUnauthorized) // 401
-				return
-			}
-			// Otro error al obtener la cookie (raro)
-			log.Printf("❌ requireAuth: Error inesperado al obtener cookie de sesión: %v", err)
-			http.Error(w, "Error interno al procesar autenticación.", http.StatusInternalServerError) // 500
+			// Si no hay cookie, el usuario no está autenticado
+			log.Printf("❌ Error de autenticación: No se encontró la cookie de sesión")
+			http.Error(w, "No autorizado", http.StatusUnauthorized)
 			return
 		}
 
-		// 2. Obtener el ID de sesión de la cookie
-		sessionID := cookie.Value
-		if sessionID == "" {
-			log.Println("❌ requireAuth: Cookie de sesión encontrada, pero el valor (ID de sesión) está vacío.")
-			http.Error(w, "Sesión inválida.", http.StatusUnauthorized) // 401
-			// Opcional: Invalidar la cookie aquí
+		// Obtener el usuario asociado a la sesión
+		user, ok := obtenerSesion(cookie.Value)
+		if !ok {
+			// Si la sesión no existe o es inválida
+			log.Printf("❌ Error de autenticación: Sesión inválida")
+			http.Error(w, "Sesión inválida", http.StatusUnauthorized)
 			return
 		}
-		log.Printf("requireAuth: Cookie encontrada con ID de sesión: %s", sessionID)
 
-		// 3. --- ¡¡VALIDAR EL ID DE SESIÓN CONTRA EL ALMACENAMIENTO EN MEMORIA!! ---
-		// Usar la función del paquete usuario para buscar el ID de usuario asociado al ID de sesión
-		// Tu lógica actual ObtenerSesion(cookie.Value) que devuelve usuario.Usuario y bool funciona si mueves sesiones a usuario.
-		// Si mantienes sesiones en main, usa obtenerSesion de main.
-		// Asumiendo que la lógica de sesiones está en modules/usuario:
-		userID, existe := usuario.ObtenerUsuarioIDPorSesion(sessionID) // Función del paquete usuario
-		if !existe {
-			log.Printf("❌ requireAuth: ID de sesión '%s' no encontrado o expirado en el almacenamiento.", sessionID)
-			// Opcional: Invalidar la cookie en el cliente
-			setExpiredCookie(w)                                                                                      // Necesitarías implementar setExpiredCookie
-			http.Error(w, "Sesión expirada o inválida. Por favor, inicia sesión de nuevo.", http.StatusUnauthorized) // 401
-			return
-		}
-		log.Printf("✅ requireAuth: Sesión ID %s válida para usuario ID %s", sessionID, userID)
-
-		// 4. --- OBTENER EL STRUCT COMPLETO DEL USUARIO AUTENTICADO ---
-		// Ahora que sabemos el ID del usuario, obtenemos su struct completo usando la función del paquete usuario.
-		user, existe := usuario.ObtenerUsuarioPorID(userID) // Función del paquete usuario
-		if !existe {
-			log.Printf("❌ requireAuth: Error interno. Usuario ID %s encontrado en sesiones, pero no en almacenamiento de usuarios.", userID)
-			// Opcional: Eliminar la sesión ya que apunta a un usuario inexistente
-			usuario.EliminarSesion(sessionID)                                                // Función del paquete usuario
-			setExpiredCookie(w)                                                              // Necesitarías implementar setExpiredCookie
-			http.Error(w, "Error interno de autenticación.", http.StatusInternalServerError) // 500
-			return
-		}
-		log.Printf("requireAuth: Usuario autenticado: '%s' con Rol '%s'", user.NombreUsuario, user.Rol)
-
-		// 5. --- PASAR EL USUARIO AUTENTICADO AL SIGUIENTE HANDLER USANDO CONTEXTO ---
-		// Creamos un nuevo contexto con el usuario autenticado bajo la clave ContextKeyUsuarioAutenticado
-		ctx := context.WithValue(r.Context(), ContextKeyUsuarioAutenticado, user)
-		// Creamos una NUEVA petición con este contexto modificado
-		rWithContext := r.WithContext(ctx)
-
-		// 6. Llamar al siguiente handler (o al próximo middleware) con la petición que contiene el contexto
-		log.Println("requireAuth: Autenticación exitosa. Pasando a siguiente handler.")
-		next.ServeHTTP(w, rWithContext) // ¡Importante usar rWithContext!
+		log.Printf("✅ Usuario autenticado: %s", user.NombreUsuario)
+		// Agregar el usuario al contexto de la petición
+		ctx := contextWithUsuario(r.Context(), user)
+		// Llamar al siguiente handler con el contexto actualizado
+		next(w, r.WithContext(ctx))
 	}
 }
 
-// Middleware de Permisos
-// requireRole es una fábrica de middleware que verifica si el usuario autenticado tiene uno de los roles permitidos.
-// DEBE usarse DESPUÉS de requireAuth, ya que asume que el usuario está en el contexto.
-func requireRole(roles ...string) func(http.HandlerFunc) http.HandlerFunc {
+// contextWithUsuario agrega el usuario autenticado al contexto.
+func contextWithUsuario(ctx context.Context, user *usuario.Usuario) context.Context {
+	return context.WithValue(ctx, ContextKeyUsuarioAutenticado, user)
+}
+
+// requireRole es un middleware que verifica si el usuario autenticado tiene el rol requerido.
+func requireRole(rol string) func(http.HandlerFunc) http.HandlerFunc {
 	return func(next http.HandlerFunc) http.HandlerFunc {
-		// La función interna es el middleware real
 		return func(w http.ResponseWriter, r *http.Request) {
-			log.Printf("🔑 Middleware requireRole para %s %s (Roles requeridos: %v)", r.Method, r.URL.Path, roles)
-
-			// El middleware requireAuth ya puso el usuario en el contexto si la sesión era válida.
-			// Lo obtenemos del contexto.
 			user, ok := r.Context().Value(ContextKeyUsuarioAutenticado).(*usuario.Usuario)
-			if !ok || user == nil {
-				// Esto NO DEBERÍA PASAR si requireAuth se ejecutó justo antes.
-				// Si pasa, indica un error en la cadena de middlewares o en requireAuth.
-				log.Println("❌ requireRole: Error interno. Usuario autenticado no encontrado en contexto.")
-				http.Error(w, "Error de autorización interna.", http.StatusInternalServerError) // 500
+			if !ok || user == nil || user.Rol != rol {
+				http.Error(w, "No autorizado: se requiere rol "+rol, http.StatusForbidden)
 				return
 			}
-
-			// Verificar si el rol del usuario está en la lista de roles permitidos
-			allowed := false
-			for _, role := range roles {
-				if user.Rol == role {
-					allowed = true
-					break // Rol encontrado, podemos salir del bucle
-				}
-			}
-
-			if !allowed {
-				log.Printf("❌ requireRole: Acceso denegado para usuario '%s' (Rol: %s). Se requiere uno de los roles: %v.", user.NombreUsuario, user.Rol, roles)
-				http.Error(w, fmt.Sprintf("Permiso denegado. Se requiere uno de los siguientes roles: %v", roles), http.StatusForbidden) // 403 Forbidden
-				return
-			}
-
-			// Si el rol es permitido, llamar al siguiente handler en la cadena
-			log.Printf("✅ requireRole: Permiso concedido para usuario '%s' (Rol: %s).", user.NombreUsuario, user.Rol)
-			next.ServeHTTP(w, r) // Pasa la petición (que aún tiene el usuario en contexto) al siguiente
+			next(w, r)
 		}
 	}
 }
 
-// Función auxiliar para setear una cookie expirada (útil en middleware y logout)
-func setExpiredCookie(w http.ResponseWriter) {
-	expiredCookie := http.Cookie{
-		Name:     cookieNombreSesion,
-		Value:    "",
-		Expires:  time.Now().Add(-24 * time.Hour), // Un día en el pasado
-		Path:     "/",
-		HttpOnly: true,
-		Secure:   false,                // AJUSTAR para producción con HTTPS
-		SameSite: http.SameSiteLaxMode, // Ajustar si usaste StrictMode
-	}
-	http.SetCookie(w, &expiredCookie)
+// configurarCORS agrega las cabeceras necesarias para permitir CORS en las respuestas HTTP.
+func configurarCORS(w http.ResponseWriter) {
+	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:8080")
+	w.Header().Set("Access-Control-Allow-Methods", "POST, GET, OPTIONS, PUT, DELETE")
+	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type, Content-Length, Accept-Encoding, Authorization")
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
 }
 
-// Función auxiliar para configurar cabeceras CORS (Llamar al inicio de CADA handler API)
-func configurarCORS(w http.ResponseWriter) {
-	// !!! IMPORTANTE: Reemplaza "http://localhost:5500" con el ORIGEN REAL de tu frontend
-	// Si usas VS Code Live Server, suele ser 5500. Si es otro puerto, ajusta.
-	w.Header().Set("Access-Control-Allow-Origin", "http://localhost:5500")
-	w.Header().Set("Access-Control-Allow-Credentials", "true")                        // Necesario para que el navegador envíe cookies (sesión)
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS") // Métodos permitidos para el frontend
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")     // Cabeceras permitidas en la petición (Authorization por si usas tokens después, Content-Type para JSON)
+// Agregar estas funciones que faltan:
+func loginHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		configurarCORS(w)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+		return
+	}
+	iniciarSesionHandler(w, r)
+}
 
-	// Handle preflight OPTIONS requests - CORS middleware real haría esto de otra forma
-	// Para esta evaluación, puedes añadir una verificación básica si OPTIONS es un problema.
-	// if r.Method == http.MethodOptions {
-	//      w.WriteHeader(http.StatusOK)
-	//      return // Terminar la petición OPTIONS aquí
-	// }
-	// Esta verificación del método OPTIONS debe ir en el envoltorio de cada handler,
-	// o idealmente en un middleware CORS dedicado que envuelva todo el mux API.
-	// Por ahora, confiar en que configurarCORS setea las cabeceras correctas para la respuesta
-	// y que el navegador las respeta puede ser suficiente para la evaluación.
+func logoutHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodOptions {
+		configurarCORS(w)
+		return
+	}
+	cerrarSesionHandler(w, r)
+}
+
+func manejarProducto(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		obtenerProductoHandler(w, r)
+	case http.MethodPut:
+		actualizarProductoHandler(w, r)
+	case http.MethodDelete:
+		eliminarProductoHandler(w, r)
+	case http.MethodOptions:
+		configurarCORS(w)
+	default:
+		http.Error(w, "Método no permitido", http.StatusMethodNotAllowed)
+	}
+}
+
+func obtenerSesion(sessionID string) (*usuario.Usuario, bool) {
+	userID, existe := usuario.ObtenerUsuarioIDPorSesion(sessionID)
+	if !existe {
+		return nil, false
+	}
+
+	user, existe := usuario.ObtenerUsuarioPorID(userID)
+	if !existe {
+		return nil, false
+	}
+
+	return user, true
 }

@@ -1,0 +1,10 @@
+# github.com/google/uuid v1.6.0
+## explicit
+github.com/google/uuid
+# golang.org/x/crypto v0.21.0
+## explicit; go 1.18
+golang.org/x/crypto/bcrypt
+golang.org/x/crypto/blowfish
+# github.com/yourusername/webworkshop-eva3/web/modules/producto => ./web/modules/producto
+# github.com/yourusername/webworkshop-eva3/web/modules/usuario => ./web/modules/usuario
+# github.com/yourusername/webworkshop-eva3/web/public => ./web/public
